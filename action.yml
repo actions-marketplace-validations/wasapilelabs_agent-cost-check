@@ -1,0 +1,98 @@
+name: Nodagentry Agent Cost Check
+description: Comment on pull requests with the estimated cost per run of LangGraph, CrewAI and OpenAI Agents SDK code, before and after.
+author: Wasapile Labs
+branding:
+  icon: dollar-sign
+  color: green
+inputs:
+  token:
+    description: Your Nodagentry CI token (starts with ngc_). Save it as a repository secret named NODAGENTRY_TOKEN and pass it in.
+    required: true
+  fail-above-pct:
+    description: Fail the check when a file's estimated cost per run rises by more than this percentage. Empty means comment only.
+    required: false
+    default: ""
+  task:
+    description: A typical request for your agent, used for the estimate. Longer tasks mean more input tokens. Empty means a short support request.
+    required: false
+    default: ""
+  checkout:
+    description: Check out the repository with full history first. Set to "false" if an earlier step already ran actions/checkout with fetch-depth 0.
+    required: false
+    default: "true"
+  github-token:
+    description: Token used to post the pull request comment. The workflow needs pull-requests write permission.
+    required: false
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - if: inputs.checkout == 'true'
+      uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - uses: actions/github-script@v8
+      env:
+        NODAGENTRY_TOKEN: ${{ inputs.token }}
+        FAIL_ABOVE_PCT: ${{ inputs.fail-above-pct }}
+        NODAGENTRY_TASK: ${{ inputs.task }}
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const { execFileSync } = require("child_process");
+          const token = process.env.NODAGENTRY_TOKEN;
+          if (!token) {
+            core.warning("Add a NODAGENTRY_TOKEN repository secret to run the agent cost check.");
+            return;
+          }
+          const pr = context.payload.pull_request;
+          if (!pr) {
+            core.warning("The agent cost check runs on pull_request events.");
+            return;
+          }
+          const git = (...args) => execFileSync("git", args, { encoding: "utf8", maxBuffer: 64 << 20 });
+          const base = git("merge-base", pr.base.sha, pr.head.sha).trim();
+          const changed = git("diff", "--name-only", "-z", base, pr.head.sha)
+            .split("\0")
+            .filter((p) => /\.(py|[cm]?[jt]s)$/.test(p));
+          const AGENT = /crewai|@openai\/agents|from\s+agents|langgraph|StateGraph|add_?[nN]ode\s*\(|create_?[rR]eact_?[aA]gent|\bCrew\s*\(|Runner\.run/;
+          const read = (sha, path) => {
+            try {
+              return execFileSync("git", ["show", sha + ":" + path], { encoding: "utf8", maxBuffer: 64 << 20, stdio: ["ignore", "pipe", "ignore"] });
+            } catch {
+              return null;
+            }
+          };
+          const pick = (sha) => changed
+            .map((path) => ({ path, content: read(sha, path) }))
+            .filter((f) => f.content !== null && f.content.length <= 200000 && AGENT.test(f.content))
+            .slice(0, 100);
+          const files = { base: pick(base), head: pick(pr.head.sha) };
+          if (!files.base.length && !files.head.length) {
+            core.info("No agent code changed in this pull request.");
+            return;
+          }
+          const url = (process.env.NODAGENTRY_URL || "https://nodagentry.com") + "/api/cost-check";
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+            body: JSON.stringify({ ...files, task: process.env.NODAGENTRY_TASK || undefined }),
+          });
+          const out = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            core.setFailed("Nodagentry: " + (out.error || "HTTP " + res.status));
+            return;
+          }
+          const marker = "<!-- nodagentry-cost-check -->";
+          const body = marker + "\n" + out.markdown;
+          const { owner, repo } = context.repo;
+          const issue_number = pr.number;
+          const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+          const mine = comments.find((c) => c.body && c.body.startsWith(marker));
+          if (mine) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+          else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+          const limit = Number(process.env.FAIL_ABOVE_PCT);
+          if (limit > 0 && out.maxIncreasePct > limit) {
+            core.setFailed("Estimated cost per run rose " + out.maxIncreasePct + "% (limit " + limit + "%).");
+          }
