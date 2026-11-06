@@ -30,7 +30,7 @@ Here a pull request moves the Writer agent in a CrewAI crew from `gpt-6-luna` to
 
 ## Set it up
 
-1. **Create a token.** Sign in at [nodagentry.com/docs/ci-cost-check](https://nodagentry.com/docs/ci-cost-check) and create a CI token. The check is part of the Nodagentry Monthly plan (US$29 a month).
+1. **Create a token.** Sign in at [nodagentry.com/docs/ci-cost-check](https://nodagentry.com/docs/ci-cost-check) and create a CI token. The check is part of the Nodagentry Monthly plan (US$29 a month, first 7 days free).
 2. **Add it to the repository.** In GitHub, open Settings, then Secrets and variables, then Actions, and add a repository secret named `NODAGENTRY_TOKEN` with the token as its value.
 3. **Add the workflow.** Save this as `.github/workflows/agent-cost.yml` on your default branch.
 
@@ -46,7 +46,7 @@ jobs:
   cost:
     runs-on: ubuntu-latest
     steps:
-      - uses: wasapilelabs/agent-cost-check@v1
+      - uses: wasapilelabs/agent-cost-check@v1.0.0
         with:
           token: ${{ secrets.NODAGENTRY_TOKEN }}
           # Optional: fail the check when a file's estimated cost rises by more than this %.
